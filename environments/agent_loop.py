@@ -315,6 +315,11 @@ class HermesAgentLoop:
                 if reasoning:
                     msg_dict["reasoning_content"] = reasoning
 
+                for _field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+                    _val = getattr(assistant_msg, _field, None)
+                    if _val is not None:
+                        msg_dict[_field] = _val
+
                 messages.append(msg_dict)
 
                 # Execute each tool call via hermes-agent's dispatch
@@ -471,6 +476,12 @@ class HermesAgentLoop:
                 }
                 if reasoning:
                     msg_dict["reasoning_content"] = reasoning
+
+                for _field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+                    _val = getattr(assistant_msg, _field, None)
+                    if _val is not None:
+                        msg_dict[_field] = _val
+
                 messages.append(msg_dict)
 
                 turn_elapsed = _time.monotonic() - turn_start
