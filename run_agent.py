@@ -5202,7 +5202,7 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
-    def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
+    def _build_assistant_message(self, assistant_message, finish_reason: str, response=None) -> dict:
         """Build a normalized assistant message dict from an API response message.
 
         Handles reasoning extraction, reasoning_details, and optional tool_calls
@@ -5245,6 +5245,30 @@ class AIAgent:
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
         }
+
+        # Inject per-token training data from vLLM logprobs when available.
+        # Requires return_tokens_as_token_ids=True and logprobs=True on the request.
+        # prompt_token_ids is left empty; populate via the tokenize endpoint if needed.
+        if response is not None:
+            try:
+                lp_content = getattr(getattr(response.choices[0], "logprobs", None), "content", None)
+                if lp_content:
+                    gen_ids = []
+                    gen_lps = []
+                    for lp in lp_content:
+                        tok = getattr(lp, "token", "")
+                        if tok.startswith("token_id:"):
+                            try:
+                                gen_ids.append(int(tok[len("token_id:"):]))
+                            except ValueError:
+                                pass
+                        gen_lps.append(float(getattr(lp, "logprob", 0.0)))
+                    if gen_ids:
+                        msg["prompt_token_ids"] = []
+                        msg["generation_token_ids"] = gen_ids
+                        msg["generation_log_probs"] = gen_lps
+            except Exception:
+                pass
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -8110,7 +8134,7 @@ class AIAgent:
                                 "error": f"Model generated invalid tool call: {invalid_preview}"
                             }
 
-                        assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
+                        assistant_msg = self._build_assistant_message(assistant_message, finish_reason, response=response)
                         messages.append(assistant_msg)
                         for tc in assistant_message.tool_calls:
                             if tc.function.name not in self.valid_tool_names:
@@ -8198,8 +8222,8 @@ class AIAgent:
                         assistant_message.tool_calls
                     )
 
-                    assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    
+                    assistant_msg = self._build_assistant_message(assistant_message, finish_reason, response=response)
+
                     # If this turn has both content AND tool_calls, capture the content
                     # as a fallback final response. Common pattern: model delivers its
                     # answer and calls memory/skill tools as a side-effect in the same
@@ -8515,8 +8539,8 @@ class AIAgent:
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
                     
-                    final_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    
+                    final_msg = self._build_assistant_message(assistant_message, finish_reason, response=response)
+
                     messages.append(final_msg)
                     
                     if not self.quiet_mode:
