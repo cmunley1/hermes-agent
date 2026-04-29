@@ -519,6 +519,8 @@ class AIAgent:
         use_streaming: bool = True,
         temperature: float = None,
         insert_reasoning: bool = True,
+        top_p: float = None,
+        chat_template_kwargs: dict = None,
     ):
         """
         Initialize the AI Agent.
@@ -573,6 +575,8 @@ class AIAgent:
         self.use_streaming = use_streaming
         self.temperature = temperature
         self.insert_reasoning = insert_reasoning
+        self.top_p = top_p
+        self.chat_template_kwargs = chat_template_kwargs or {}
         # Shared iteration budget — parent creates, children inherit.
         # Consumed by every LLM turn across parent + all subagents.
         self.iteration_budget = iteration_budget or IterationBudget(max_iterations)
@@ -5074,6 +5078,10 @@ class AIAgent:
         }
         if self.temperature is not None:
             api_kwargs["temperature"] = self.temperature
+        if self.top_p is not None:
+            api_kwargs["top_p"] = self.top_p
+        if self.chat_template_kwargs:
+            api_kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = self.chat_template_kwargs
         if self.tools:
             api_kwargs["tools"] = self.tools
 
@@ -5249,10 +5257,16 @@ class AIAgent:
             "finish_reason": finish_reason,
         }
         
-        if hasattr(assistant_message, "prompt_token_ids") and assistant_message.prompt_token_ids is not None:
-            msg["prompt_token_ids"] = assistant_message.prompt_token_ids
-            msg["generation_token_ids"] = assistant_message.generation_token_ids
-            msg["generation_log_probs"] = assistant_message.generation_log_probs
+        # openai>=2.x + pydantic v2 preserves unknown server fields in
+        # model_extra rather than as attributes; check both.
+        _extras = getattr(assistant_message, "model_extra", None) or {}
+        pti = getattr(assistant_message, "prompt_token_ids", None) or _extras.get("prompt_token_ids")
+        gti = getattr(assistant_message, "generation_token_ids", None) or _extras.get("generation_token_ids")
+        glp = getattr(assistant_message, "generation_log_probs", None) or _extras.get("generation_log_probs")
+        if pti is not None and gti is not None:
+            msg["prompt_token_ids"] = pti
+            msg["generation_token_ids"] = gti
+            msg["generation_log_probs"] = glp or []
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -5464,9 +5478,11 @@ class AIAgent:
                     "model": self.model,
                     "messages": api_messages,
                     "tools": [memory_tool_def],
-                    "temperature": 0.3,
+                    "temperature": self.temperature if self.temperature is not None else 0.3,
                     **self._max_tokens_param(5120),
                 }
+                if self.top_p is not None:
+                    api_kwargs["top_p"] = self.top_p
                 response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(**api_kwargs, timeout=30.0)
 
             # Extract tool calls from the response, handling all API formats
@@ -6296,6 +6312,10 @@ class AIAgent:
                     "model": self.model,
                     "messages": api_messages,
                 }
+                if self.temperature is not None:
+                    summary_kwargs["temperature"] = self.temperature
+                if self.top_p is not None:
+                    summary_kwargs["top_p"] = self.top_p
                 if self.max_tokens is not None:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
 
@@ -7827,12 +7847,19 @@ class AIAgent:
                     )
                 else:
                     assistant_message = response.choices[0].message
-                    if hasattr(assistant_message, "prompt_token_ids") and assistant_message.prompt_token_ids is not None:
-                        prompt_token_ids = assistant_message.prompt_token_ids
-                    if hasattr(assistant_message, "generation_token_ids") and assistant_message.generation_token_ids is not None:
-                        generation_token_ids = assistant_message.generation_token_ids
-                    if hasattr(assistant_message, "generation_log_probs") and assistant_message.generation_log_probs is not None:
-                        generation_log_probs = assistant_message.generation_log_probs
+                    _extras = getattr(assistant_message, "model_extra", None) or {}
+                    prompt_token_ids = (
+                        getattr(assistant_message, "prompt_token_ids", None)
+                        or _extras.get("prompt_token_ids")
+                    )
+                    generation_token_ids = (
+                        getattr(assistant_message, "generation_token_ids", None)
+                        or _extras.get("generation_token_ids")
+                    )
+                    generation_log_probs = (
+                        getattr(assistant_message, "generation_log_probs", None)
+                        or _extras.get("generation_log_probs")
+                    )
                 
                 # Normalize content to string — some OpenAI-compatible servers
                 # (llama-server, etc.) return content as a dict or list instead
