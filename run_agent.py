@@ -6252,13 +6252,14 @@ class AIAgent:
         try:
             # Build API messages, stripping internal-only fields
             # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
-            _is_strict_api = "api.mistral.ai" in self._base_url_lower
+            _is_chat_api = self.api_mode not in {"codex_responses", "anthropic_messages"}
             api_messages = []
             for msg in messages:
                 api_msg = msg.copy()
                 for internal_field in ("reasoning", "finish_reason"):
                     api_msg.pop(internal_field, None)
-                if _is_strict_api:
+                if _is_chat_api:
+                    api_msg.pop("codex_reasoning_items", None)
                     self._sanitize_tool_calls_for_strict_api(api_msg)
                 api_messages.append(api_msg)
 
@@ -6325,7 +6326,7 @@ class AIAgent:
                     _msg, _ = _nar(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_msg.content or "").strip()
                 else:
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                    summary_response = self._interruptible_api_call(summary_kwargs)
 
                     if summary_response.choices and summary_response.choices[0].message.content:
                         final_response = summary_response.choices[0].message.content
@@ -6366,7 +6367,7 @@ class AIAgent:
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                    summary_response = self._interruptible_api_call(summary_kwargs)
 
                     if summary_response.choices and summary_response.choices[0].message.content:
                         final_response = summary_response.choices[0].message.content
@@ -8416,10 +8417,11 @@ class AIAgent:
                     messages.append({"role": "assistant", "content": final_response})
                     break
         
-        if final_response is None and (
+        iteration_limit_reached = final_response is None and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0
-        ):
+        )
+        if iteration_limit_reached:
             if self.iteration_budget.remaining <= 0 and not self.quiet_mode:
                 print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
             final_response = self._handle_max_iterations(messages, api_call_count)
@@ -8493,6 +8495,8 @@ class AIAgent:
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
         }
+        if iteration_limit_reached:
+            result["stop_reason"] = "max_iterations"
         self._response_was_previewed = False
         
         # Include interrupt message if one triggered the interrupt

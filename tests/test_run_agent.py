@@ -1349,6 +1349,44 @@ class TestParallelScopePathNormalization:
 
 
 class TestHandleMaxIterations:
+    @pytest.fixture(autouse=True)
+    def request_client(self, agent, monkeypatch):
+        monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kwargs: agent.client)
+        monkeypatch.setattr(agent, "_close_request_openai_client", lambda *args, **kwargs: None)
+
+    @pytest.mark.parametrize("retry", [False, True])
+    def test_strict_chat_summary_preserves_internal_history(self, agent, retry):
+        agent.api_mode = "chat_completions"
+        agent._base_url_lower = "http://gym:8000/v1"
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{
+            "role": "assistant", "content": None,
+            "reasoning": "private replay state", "finish_reason": "tool_calls",
+            "codex_reasoning_items": [{"id": "rs_1"}],
+            "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "call_id": "call_1", "response_item_id": "fc_1",
+                "function": {"name": "web_search", "arguments": "{}"},
+            }],
+        }, {"role": "tool", "tool_call_id": "call_1", "content": "result"}]
+        original = json.loads(json.dumps(messages))
+        replies = [_mock_response(content="Summary")]
+        if retry:
+            replies.insert(0, _mock_response(content=""))
+        agent._interruptible_api_call = MagicMock(side_effect=replies)
+
+        assert agent._handle_max_iterations(messages, 1) == "Summary"
+
+        assert agent._interruptible_api_call.call_count == len(replies)
+        for call in agent._interruptible_api_call.call_args_list:
+            kwargs = call.args[0]
+            assert "tools" not in kwargs
+            assistant = next(m for m in kwargs["messages"] if m["role"] == "assistant")
+            assert set(assistant) == {"role", "content", "tool_calls"}
+            assert set(assistant["tool_calls"][0]) == {"id", "type", "function"}
+            assert kwargs["messages"][-2]["tool_call_id"] == "call_1"
+        assert messages[:2] == original
+
     def test_returns_summary(self, agent):
         resp = _mock_response(content="Here is a summary of what I did.")
         agent.client.chat.completions.create.return_value = resp
@@ -1425,6 +1463,29 @@ class TestRunConversation:
             result = agent.run_conversation("search something")
         assert result["final_response"] == "Done searching"
         assert result["api_calls"] == 2
+
+    def test_iteration_limit_returns_summary_with_explicit_stop_reason(self, agent):
+        self._setup_agent(agent)
+        agent.max_iterations = 1
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        replies = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+            _mock_response(content="Partial work summary", finish_reason="stop"),
+        ]
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=replies) as request,
+        ):
+            result = agent.run_conversation("search something")
+        assert result["completed"] is False
+        assert result["stop_reason"] == "max_iterations"
+        assert result["final_response"] == "Partial work summary"
+        assert result["api_calls"] == 1
+        assert request.call_count == 2
+        assert any(m["role"] == "tool" for m in result["messages"])
 
     def test_interrupt_breaks_loop(self, agent):
         self._setup_agent(agent)

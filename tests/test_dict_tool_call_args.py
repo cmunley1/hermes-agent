@@ -47,7 +47,9 @@ class _FakeClient:
 def test_tool_call_validation_accepts_dict_arguments(monkeypatch):
     from run_agent import AIAgent
 
-    monkeypatch.setattr("run_agent.OpenAI", lambda **kwargs: _FakeClient())
+    # Request-scoped clients must share the fake provider's response sequence.
+    client = _FakeClient()
+    monkeypatch.setattr("run_agent.OpenAI", lambda **kwargs: client)
     monkeypatch.setattr(
         "run_agent.get_tool_definitions",
         lambda *args, **kwargs: [{"function": {"name": "read_file"}}],
