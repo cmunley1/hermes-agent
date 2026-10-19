@@ -6292,12 +6292,10 @@ class AIAgent:
                 assistant_message, _ = self._normalize_codex_response(summary_response)
                 final_response = (assistant_message.content or "").strip() if assistant_message else ""
             else:
-                summary_kwargs = {
-                    "model": self.model,
-                    "messages": api_messages,
-                }
-                if self.max_tokens is not None:
-                    summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                # Build the request with the SAME builder as every other call (sanitized tool_calls, same tools, same
+                # prompt envelope) and forbid tool use with tool_choice instead of omitting the tools.
+                summary_kwargs = self._build_api_kwargs(api_messages)
+                summary_kwargs["tool_choice"] = "none"
 
                 # Include provider routing preferences
                 provider_preferences = {}
@@ -6313,7 +6311,7 @@ class AIAgent:
                     summary_extra_body["provider"] = provider_preferences
 
                 if summary_extra_body:
-                    summary_kwargs["extra_body"] = summary_extra_body
+                    summary_kwargs["extra_body"] = {**summary_kwargs.get("extra_body", {}), **summary_extra_body}
 
                 if self.api_mode == "anthropic_messages":
                     from agent.anthropic_adapter import build_anthropic_kwargs as _bak, normalize_anthropic_response as _nar
@@ -6357,14 +6355,10 @@ class AIAgent:
                     _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_retry_msg.content or "").strip()
                 else:
-                    summary_kwargs = {
-                        "model": self.model,
-                        "messages": api_messages,
-                    }
-                    if self.max_tokens is not None:
-                        summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                    summary_kwargs = self._build_api_kwargs(api_messages)
+                    summary_kwargs["tool_choice"] = "none"
                     if summary_extra_body:
-                        summary_kwargs["extra_body"] = summary_extra_body
+                        summary_kwargs["extra_body"] = {**summary_kwargs.get("extra_body", {}), **summary_extra_body}
 
                     summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
 
